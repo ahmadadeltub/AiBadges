@@ -611,13 +611,20 @@ class ReverseTranslateWindow(QWidget):
         self.show_gesture_for_word(recognized_text)
 
     def recognize_speech(self):
+        import speech_recognition as sr
         r = sr.Recognizer()
+        r.dynamic_energy_threshold = True
         with sr.Microphone() as source:
+            r.adjust_for_ambient_noise(source, duration=0.5)
+            self.status_label.setText("Listening... (Please speak now)")
+            QApplication.processEvents()
             try:
-                # Listen up to 5 seconds for speech, up to 5 seconds of phrase time
-                audio = r.listen(source, timeout=5, phrase_time_limit=5)
+                audio = r.listen(source, timeout=3, phrase_time_limit=4)
             except sr.WaitTimeoutError:
                 return None
+        self.status_label.setText("Processing...")
+        QApplication.processEvents()
+
         try:
             text = r.recognize_google(audio)
             return text.lower()
@@ -625,6 +632,7 @@ class ReverseTranslateWindow(QWidget):
             return None
         except sr.RequestError:
             return None
+
 
     def show_gesture_for_word(self, word):
         if word in self.gestures:
