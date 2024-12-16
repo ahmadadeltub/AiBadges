@@ -1,0 +1,863 @@
+import sys
+import os
+import cv2
+import csv
+import mediapipe as mp
+import numpy as np
+import pandas as pd
+import joblib
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import LabelEncoder, StandardScaler
+from tensorflow.keras.models import Sequential, load_model
+from tensorflow.keras.layers import Dense, Dropout, Input
+from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
+from tensorflow.keras.optimizers import Adam
+import pyttsx3
+import speech_recognition as sr
+import time
+
+from PyQt5.QtWidgets import (QApplication, QWidget, QVBoxLayout, QLabel, QLineEdit,
+                             QPushButton, QMessageBox, QListWidget, QComboBox, QHBoxLayout, QFrame, QDialog, QDialogButtonBox)
+from PyQt5.QtGui import QPixmap, QImage, QFont, QIcon
+from PyQt5.QtCore import Qt, QTimer, QThread, pyqtSignal
+
+# Add Gesture Window
+class AddGestureWindow(QWidget):
+    GESTURES_FILE = 'gesture_data/gestures.txt'
+
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("Add / Manage Gestures")
+        self.setGeometry(300, 150, 500, 600)
+        self.init_ui()
+
+    def init_ui(self):
+        layout = QVBoxLayout()
+        self.title_label = QLabel("Manage Gestures")
+        self.gesture_list = QListWidget()
+        self.load_gestures()
+        self.gesture_input = QLineEdit()
+        self.gesture_input.setPlaceholderText("Enter gesture name")
+
+        # Buttons
+        button_layout = QHBoxLayout()
+        self.add_button = QPushButton("Add Gesture")
+        self.modify_button = QPushButton("Modify Gesture")
+        self.delete_button = QPushButton("Delete Gesture")
+        button_layout.addWidget(self.add_button)
+        button_layout.addWidget(self.modify_button)
+        button_layout.addWidget(self.delete_button)
+
+        # Connect buttons
+        self.add_button.clicked.connect(self.add_gesture)
+        self.modify_button.clicked.connect(self.modify_gesture)
+        self.delete_button.clicked.connect(self.delete_gesture)
+
+        # Layout setup
+        layout.addWidget(self.title_label)
+        layout.addWidget(self.gesture_list)
+        layout.addWidget(self.gesture_input)
+        layout.addLayout(button_layout)
+        self.setLayout(layout)
+
+    def load_gestures(self):
+        self.gesture_list.clear()
+        if os.path.exists(self.GESTURES_FILE):
+            with open(self.GESTURES_FILE, 'r') as file:
+                gestures = file.read().splitlines()
+                self.gesture_list.addItems(gestures)
+
+    def add_gesture(self):
+        gesture = self.gesture_input.text().strip()
+        if not gesture:
+            QMessageBox.warning(self, "Error", "Please enter a gesture name.")
+            return
+        if gesture in self.get_gesture_list():
+            QMessageBox.warning(self, "Error", "Gesture already exists.")
+            return
+
+        with open(self.GESTURES_FILE, 'a') as file:
+            file.write(gesture + '\n')
+        self.gesture_list.addItem(gesture)
+        self.gesture_input.clear()
+        QMessageBox.information(self, "Success", f"Gesture '{gesture}' added successfully.")
+
+    def modify_gesture(self):
+        selected_item = self.gesture_list.currentItem()
+        if not selected_item:
+            QMessageBox.warning(self, "Error", "Please select a gesture to modify.")
+            return
+
+        new_gesture = self.gesture_input.text().strip()
+        if not new_gesture:
+            QMessageBox.warning(self, "Error", "Please enter the new gesture name.")
+            return
+        if new_gesture in self.get_gesture_list():
+            QMessageBox.warning(self, "Error", "Gesture already exists.")
+            return
+
+        old_gesture = selected_item.text()
+        selected_item.setText(new_gesture)
+        self.save_gestures()
+        QMessageBox.information(self, "Success", f"Gesture '{old_gesture}' modified to '{new_gesture}'.")
+
+    def delete_gesture(self):
+        selected_item = self.gesture_list.currentItem()
+        if not selected_item:
+            QMessageBox.warning(self, "Error", "Please select a gesture to delete.")
+            return
+
+        reply = QMessageBox.question(self, "Delete Gesture", f"Are you sure you want to delete '{selected_item.text()}'?",
+                                     QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        if reply == QMessageBox.Yes:
+            text = selected_item.text()
+            self.gesture_list.takeItem(self.gesture_list.row(selected_item))
+            self.save_gestures()
+            QMessageBox.information(self, "Success", f"Gesture '{text}' deleted successfully.")
+
+    def save_gestures(self):
+        with open(self.GESTURES_FILE, 'w') as file:
+            for i in range(self.gesture_list.count()):
+                file.write(self.gesture_list.item(i).text() + '\n')
+
+    def get_gesture_list(self):
+        return [self.gesture_list.item(i).text() for i in range(self.gesture_list.count())]
+
+
+# Data Collection Thread
+class DataCollectionThread(QThread):
+    collection_complete = pyqtSignal(str)
+
+    def __init__(self, gesture_name):
+        super().__init__()
+        self.gesture_name = gesture_name
+        self.running = True
+
+    def run(self):
+        DATA_DIR = 'gesture_data'
+        IMAGES_DIR = 'gesture_images'
+        CSV_FILE = os.path.join(DATA_DIR, 'gesture_landmarks.csv')
+        os.makedirs(DATA_DIR, exist_ok=True)
+        os.makedirs(IMAGES_DIR, exist_ok=True)
+
+        cap = cv2.VideoCapture(0)
+        if not cap.isOpened():
+            self.collection_complete.emit("Error: Could not open the camera.")
+            return
+
+        mp_hands = mp.solutions.hands
+        hands = mp_hands.Hands(max_num_hands=1, min_detection_confidence=0.7)
+        collected_samples = 0
+        required_samples = 200
+        last_frame = None
+
+        while collected_samples < required_samples and self.running:
+            ret, frame = cap.read()
+            if not ret:
+                continue
+
+            frame = cv2.flip(frame, 1)
+            rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            results = hands.process(rgb_frame)
+
+            if results.multi_hand_landmarks:
+                for hand_landmarks in results.multi_hand_landmarks:
+                    try:
+                        landmarks = [lm for point in hand_landmarks.landmark for lm in (point.x, point.y, point.z)]
+                        data_row = [self.gesture_name] + landmarks
+                        with open(CSV_FILE, 'a', newline='') as file:
+                            writer = csv.writer(file)
+                            writer.writerow(data_row)
+                        collected_samples += 1
+                        mp.solutions.drawing_utils.draw_landmarks(frame, hand_landmarks, mp_hands.HAND_CONNECTIONS)
+                        last_frame = frame.copy()
+                    except Exception as e:
+                        print(f"Error processing landmarks: {e}")
+
+            cv2.putText(frame, f"Gesture: {self.gesture_name}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+            cv2.putText(frame, f"Samples: {collected_samples}/{required_samples}", (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+
+            cv2.imshow("Collect Hand Gestures", frame)
+
+            key = cv2.waitKey(1) & 0xFF
+            if key == ord('q'):
+                break
+
+        cap.release()
+        hands.close()
+        cv2.destroyAllWindows()
+
+        if collected_samples >= required_samples:
+            # Save a representative frame as gesture image
+            if last_frame is not None:
+                image_path = os.path.join(IMAGES_DIR, f"{self.gesture_name}.png")
+                cv2.imwrite(image_path, last_frame)
+            self.collection_complete.emit(f"Collected {collected_samples} samples for gesture '{self.gesture_name}'. Representative image saved.")
+        else:
+            self.collection_complete.emit("Data collection incomplete.")
+
+    def stop(self):
+        self.running = False
+
+
+# Collect Data Window
+class CollectDataWindow(QWidget):
+    GESTURES_FILE = 'gesture_data/gestures.txt'
+
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("Collect Data")
+        self.init_ui()
+
+    def init_ui(self):
+        layout = QVBoxLayout()
+
+        # Title for the collect data window
+        collect_title = QLabel("Collect Data")
+        collect_title.setFont(QFont("Arial", 20, QFont.Bold))
+        collect_title.setAlignment(Qt.AlignCenter)
+
+        # Frame for gesture selection
+        frame = QFrame()
+        frame.setObjectName("collectDataFrame")
+        frame_layout = QHBoxLayout(frame)  # Use horizontal layout
+
+        instruction_label = QLabel("Select a Gesture and Start Collecting:")
+        instruction_label.setAlignment(Qt.AlignCenter)
+
+        # Use a QListWidget on the right
+        self.gesture_list = QListWidget()
+        self.load_gestures()
+
+        # Add a vertical layout inside frame: left instructions and start button
+        left_layout = QVBoxLayout()
+        left_layout.addWidget(instruction_label)
+
+        self.start_button = QPushButton("Start Collecting Data")
+        left_layout.addWidget(self.start_button)
+        left_layout.addStretch()
+
+        frame_layout.addLayout(left_layout)
+        frame_layout.addWidget(self.gesture_list)  # Gestures on the right
+
+        layout.addWidget(collect_title)
+        layout.addWidget(frame)
+        self.setLayout(layout)
+
+        self.start_button.clicked.connect(self.start_collection)
+
+    def load_gestures(self):
+        if os.path.exists(self.GESTURES_FILE):
+            with open(self.GESTURES_FILE, 'r') as file:
+                gestures = file.read().splitlines()
+                self.gesture_list.addItems(gestures)
+
+    def start_collection(self):
+        selected_item = self.gesture_list.currentItem()
+        if not selected_item:
+            QMessageBox.warning(self, "Error", "Select a gesture first.")
+            return
+        gesture = selected_item.text()
+
+        self.collection_thread = DataCollectionThread(gesture)
+        self.collection_thread.collection_complete.connect(self.on_collection_complete)
+        self.collection_thread.start()
+
+    def on_collection_complete(self, message):
+        QMessageBox.information(self, "Info", message)
+
+    def closeEvent(self, event):
+        if hasattr(self, 'collection_thread') and self.collection_thread.isRunning():
+            self.collection_thread.stop()
+            self.collection_thread.wait()
+        event.accept()
+
+
+# Custom Dialog after training
+class TrainResultDialog(QDialog):
+    def __init__(self, message):
+        super().__init__()
+        self.setWindowTitle("Training Result")
+        self.setFixedSize(400, 200)
+        layout = QVBoxLayout()
+        label = QLabel(message)
+        label.setAlignment(Qt.AlignCenter)
+        label.setStyleSheet("font-size: 16px; font-weight: bold; color: #ECF0F1;")
+        layout.addWidget(label)
+
+        button_box = QDialogButtonBox(QDialogButtonBox.Ok)
+        button_box.accepted.connect(self.accept)
+        layout.addWidget(button_box)
+        self.setStyleSheet("""
+        QDialog {
+            background-color: #2F3136;
+        }
+        QDialogButtonBox QPushButton {
+            background-color: #7289DA;
+            border-radius: 5px;
+            color: #FFFFFF;
+            padding: 5px 10px;
+        }
+        QDialogButtonBox QPushButton:hover {
+            background-color: #5B6EAE;
+        }
+        """)
+
+        self.setLayout(layout)
+
+
+# Train Model Window
+class TrainWindow(QWidget):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("Train Model")
+        self.setGeometry(400, 200, 500, 300)
+        self.init_ui()
+
+    def init_ui(self):
+        layout = QVBoxLayout()
+        self.train_button = QPushButton("Start Training")
+        self.train_button.clicked.connect(self.train_model)
+        self.train_button.setStyleSheet("""
+            QPushButton {
+                background-color: #2ECC71;
+                color: #FFFFFF;
+                font-size: 16px;
+                font-weight: bold;
+                border-radius: 8px;
+                padding: 10px 20px;
+            }
+            QPushButton:hover {
+                background-color: #27AE60;
+            }
+        """)
+        layout.addWidget(self.train_button, alignment=Qt.AlignCenter)
+        self.setLayout(layout)
+
+    def train_model(self):
+        try:
+            csv_path = 'gesture_data/gesture_landmarks.csv'
+            if not os.path.exists(csv_path):
+                QMessageBox.warning(self, "Error", "No data found. Collect gesture data first.")
+                return
+
+            data = pd.read_csv(csv_path)
+            X = data.iloc[:, 1:].values
+            y = data.iloc[:, 0].values
+
+            le = LabelEncoder()
+            y_encoded = le.fit_transform(y)
+            X_train, X_test, y_train, y_test = train_test_split(X, y_encoded, test_size=0.2, random_state=42)
+
+            scaler = StandardScaler()
+            X_train = scaler.fit_transform(X_train)
+            X_test = scaler.transform(X_test)
+
+            model = Sequential([
+                Input(shape=(X_train.shape[1],)),
+                Dense(128, activation='relu'),
+                Dropout(0.2),
+                Dense(64, activation='relu'),
+                Dense(len(np.unique(y_encoded)), activation='softmax')
+            ])
+
+            model.compile(optimizer=Adam(), loss='sparse_categorical_crossentropy', metrics=['accuracy'])
+            early_stopping = EarlyStopping(monitor='val_loss', patience=3)
+            reduce_lr = ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=2)
+
+            model.fit(X_train, y_train, validation_data=(X_test, y_test), epochs=20, callbacks=[early_stopping, reduce_lr])
+            os.makedirs('models', exist_ok=True)
+            model.save('models/gesture_recognition_model.keras')
+            joblib.dump(scaler, 'models/scaler.save')
+            joblib.dump(le, 'models/label_encoder.save')
+
+            dialog = TrainResultDialog("Model trained and saved successfully!")
+            dialog.exec_()
+
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Training failed: {str(e)}")
+
+
+# Translate Gestures Window
+class TranslateWindow(QWidget):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("Translate Gestures")
+
+        # Initialize UI
+        self.init_ui()
+
+        # Initialize mediapipe, model, scaler, label encoder, etc.
+        self.hands = mp.solutions.hands.Hands(max_num_hands=1, min_detection_confidence=0.7)
+        self.engine = pyttsx3.init()
+        self.model = load_model('models/gesture_recognition_model.keras')
+        self.scaler = joblib.load('models/scaler.save')
+        self.label_encoder = joblib.load('models/label_encoder.save')
+
+        self.cap = cv2.VideoCapture(0)
+        self.timer = QTimer(self)
+        self.timer.timeout.connect(self.update_frame)
+        self.timer.start(30)
+
+        self.mp_drawing = mp.solutions.drawing_utils
+        self.mp_hands = mp.solutions.hands
+        self.last_gesture = None
+
+    def init_ui(self):
+        main_layout = QVBoxLayout()
+
+        # Add a horizontal layout for back and exit buttons
+        top_button_layout = QHBoxLayout()
+        self.back_button = QPushButton("⬅️ Back")
+        self.exit_button = QPushButton("❌ Exit")
+
+        self.back_button.setStyleSheet("""
+            QPushButton {
+                background-color: #9B59B6;
+                color: #ECF0F1;
+                font-size: 25px;
+                font-weight: bold;
+                border-radius: 8px;
+                padding: 10px;
+                text-align: center;
+            }
+            QPushButton:hover {
+                background-color: #8E44AD;
+            }
+        """)
+        self.exit_button.setStyleSheet("""
+            QPushButton {
+                background-color: #E74C3C;
+                color: #ECF0F1;
+                font-size: 25px;
+                font-weight: bold;
+                border-radius: 8px;
+                padding: 10px;
+                text-align: center;
+            }
+            QPushButton:hover {
+                background-color: #C0392B;
+            }
+        """)
+
+        self.back_button.clicked.connect(self.close)
+        self.exit_button.clicked.connect(QApplication.quit)
+
+        top_button_layout.addWidget(self.back_button)
+        top_button_layout.addWidget(self.exit_button)
+        main_layout.addLayout(top_button_layout)
+
+        self.video_label = QLabel()
+        main_layout.addWidget(self.video_label)
+        self.setLayout(main_layout)
+
+    def update_frame(self):
+        ret, frame = self.cap.read()
+        if not ret:
+            return
+
+        frame = cv2.flip(frame, 1)  # Flip horizontally
+        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+
+        results = self.hands.process(frame_rgb)
+
+        gesture = "Not Detected"
+        if results.multi_hand_landmarks:
+            for hand_landmarks in results.multi_hand_landmarks:
+                # Draw landmarks on the RGB frame
+                self.mp_drawing.draw_landmarks(frame_rgb, hand_landmarks, self.mp_hands.HAND_CONNECTIONS)
+
+                landmarks = [lm for point in hand_landmarks.landmark for lm in (point.x, point.y, point.z)]
+                X = self.scaler.transform(np.array(landmarks).reshape(1, -1))
+                prediction = self.model.predict(X)
+                class_id = np.argmax(prediction)
+                gesture = self.label_encoder.inverse_transform([class_id])[0]
+
+                # Speak only if gesture changed
+                if self.last_gesture != gesture:
+                    self.engine.say(gesture)
+                    self.engine.runAndWait()
+                    self.last_gesture = gesture
+
+        cv2.putText(frame_rgb, f"Gesture: {gesture}", (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+
+        qt_image = QImage(frame_rgb.data, frame_rgb.shape[1], frame_rgb.shape[0], QImage.Format_RGB888)
+        self.video_label.setPixmap(QPixmap.fromImage(qt_image))
+
+    def closeEvent(self, event):
+        self.cap.release()
+        self.hands.close()
+        event.accept()
+#############################################################################################
+
+class ReverseTranslateWindow(QWidget):
+    GESTURES_FILE = 'gesture_data/gestures.txt'
+    GESTURE_IMAGES_DIR = 'gesture_images'  # Directory containing gesture images
+
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("Reverse Translate (Speech to Gesture)")
+        self.init_ui()
+        self.load_gestures()
+
+        # Start the speech process after a brief delay
+        QTimer.singleShot(500, self.start_listening)
+
+    def init_ui(self):
+        self.main_layout = QVBoxLayout()
+
+        # Title
+        title_label = QLabel("Reverse Translate")
+        title_label.setFont(QFont("Arial", 24, QFont.Bold))
+        title_label.setAlignment(Qt.AlignCenter)
+        self.main_layout.addWidget(title_label)
+
+        # Instruction label
+        self.instruction_label = QLabel("Please say the gesture name...")
+        self.instruction_label.setFont(QFont("Arial", 16))
+        self.instruction_label.setAlignment(Qt.AlignCenter)
+        self.main_layout.addWidget(self.instruction_label)
+
+        # Microphone and status layout
+        mic_layout = QHBoxLayout()
+        self.mic_label = QLabel()
+        if os.path.exists("mic.png"):
+            mic_pixmap = QPixmap("mic.png").scaled(150, 150, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            self.mic_label.setPixmap(mic_pixmap)
+        else:
+            self.mic_label.setText("🎤")  # fallback if mic.png not present
+            self.mic_label.setAlignment(Qt.AlignCenter)
+            font = self.mic_label.font()
+            font.setPointSize(48)
+            self.mic_label.setFont(font)
+
+        mic_layout.addWidget(self.mic_label, alignment=Qt.AlignCenter)
+
+        self.status_label = QLabel("Preparing to listen...")
+        self.status_label.setAlignment(Qt.AlignCenter)
+        self.status_label.setFont(QFont("Arial", 14, QFont.Normal))
+        mic_layout.addWidget(self.status_label)
+        self.main_layout.addLayout(mic_layout)
+
+        self.image_label = QLabel()
+        self.image_label.setAlignment(Qt.AlignCenter)
+        self.main_layout.addWidget(self.image_label)
+
+        # Buttons (Retry and Close)
+        button_layout = QHBoxLayout()
+        self.retry_button = QPushButton("🔄 Retry")
+        self.close_button = QPushButton("❌ Close")
+
+        self.retry_button.setStyleSheet("""
+            QPushButton {
+                background-color: #3498DB;
+                color: #ECF0F1;
+                font-size: 16px;
+                font-weight: bold;
+                border-radius: 8px;
+                padding: 8px 20px;
+            }
+            QPushButton:hover {
+                background-color: #2980B9;
+            }
+        """)
+
+        self.close_button.setStyleSheet("""
+            QPushButton {
+                background-color: #E74C3C;
+                color: #ECF0F1;
+                font-size: 16px;
+                font-weight: bold;
+                border-radius: 8px;
+                padding: 8px 20px;
+            }
+            QPushButton:hover {
+                background-color: #C0392B;
+            }
+        """)
+
+        self.retry_button.clicked.connect(self.start_listening)
+        self.close_button.clicked.connect(self.close)
+
+        button_layout.addWidget(self.retry_button)
+        button_layout.addWidget(self.close_button)
+        self.main_layout.addLayout(button_layout)
+
+        self.setLayout(self.main_layout)
+
+    def load_gestures(self):
+        self.gestures = []
+        if os.path.exists(self.GESTURES_FILE):
+            with open(self.GESTURES_FILE, 'r') as file:
+                self.gestures = file.read().splitlines()
+
+    def start_listening(self):
+        self.instruction_label.setText("Please say the gesture name...")
+        self.status_label.setText("Listening...")
+        self.image_label.clear()
+        QApplication.processEvents()
+        QTimer.singleShot(100, self.capture_speech)  # start capture after tiny delay
+
+    def capture_speech(self):
+        recognized_text = self.recognize_speech()
+        if recognized_text is None:
+            self.status_label.setText("No speech detected or recognition failed.")
+            self.instruction_label.setText("Please try again.")
+            return
+
+        # At this point we have recognized some text
+        self.status_label.setText("Processing...")
+        QApplication.processEvents()
+        self.show_gesture_for_word(recognized_text)
+
+    def recognize_speech(self):
+        r = sr.Recognizer()
+        with sr.Microphone() as source:
+            try:
+                # Listen up to 5 seconds for speech, up to 5 seconds of phrase time
+                audio = r.listen(source, timeout=5, phrase_time_limit=5)
+            except sr.WaitTimeoutError:
+                return None
+        try:
+            text = r.recognize_google(audio)
+            return text.lower()
+        except sr.UnknownValueError:
+            return None
+        except sr.RequestError:
+            return None
+
+    def show_gesture_for_word(self, word):
+        if word in self.gestures:
+            image_path = os.path.join(self.GESTURE_IMAGES_DIR, f"{word}.png")
+            if os.path.exists(image_path):
+                pixmap = QPixmap(image_path)
+                self.image_label.setPixmap(pixmap.scaled(700, 700, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+                self.instruction_label.setText(f"Understood: '{word}'")
+                self.status_label.setText("Gesture found!")
+                QApplication.processEvents()
+                # Close after a short delay
+                QTimer.singleShot(5000, self.close)
+            else:
+                self.status_label.setText("No matching image found.")
+                self.instruction_label.setText(f"No image found for '{word}'. Please try another gesture.")
+        else:
+            self.status_label.setText("Unknown gesture.")
+            self.instruction_label.setText(f"'{word}' does not match any known gesture. Please try again.")
+
+    def closeEvent(self, event):
+        event.accept()
+
+# Main Menu
+class MainMenu(QWidget):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("Gesture Recognition System")
+        self.setGeometry(150, 75, 700, 600)
+        self.init_ui()
+
+    def init_ui(self):
+        # LOGOS AND TITLE
+        top_layout = QHBoxLayout()
+
+        # Left logo (qstss.png) bigger
+        self.left_logo_label = QLabel()
+        if os.path.exists("qstss.png"):
+            left_pixmap = QPixmap("qstss.png")
+            self.left_logo_label.setPixmap(left_pixmap.scaled(400, 450, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        self.left_logo_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+
+        # Project title in the center
+        self.title_label = QLabel("Gesture Recognition System")
+        self.title_label.setStyleSheet("""
+            color: #d9f1ff; 
+            font-size: 45px; 
+            font-weight: bold; 
+            padding: 140px 0 0 0;
+        """)
+        self.title_label.setAlignment(Qt.AlignCenter)
+
+        # Right logo (hamdan.png) bigger
+        self.right_logo_label = QLabel()
+        if os.path.exists("hamdan.png"):
+            right_pixmap = QPixmap("hamdan.png")
+            self.right_logo_label.setPixmap(right_pixmap.scaled(400, 450, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        self.right_logo_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+
+        top_layout.addWidget(self.left_logo_label)
+        top_layout.addWidget(self.title_label, stretch=1)
+        top_layout.addWidget(self.right_logo_label)
+
+        # Canvas frame
+        self.canvas = QFrame(self)
+        self.canvas.setObjectName("canvasFrame")
+        self.canvas.setFrameShape(QFrame.StyledPanel)
+        self.canvas.setFrameShadow(QFrame.Raised)
+
+        canvas_layout = QVBoxLayout(self.canvas)
+
+        self.add_gesture_button = self.create_button(
+            text="➕ Add / Manage Gestures",
+            color="#9B59B6",
+            hover_color="#8E44AD",
+            action=self.open_add_gesture
+        )
+
+        self.collect_data_button = self.create_button(
+            text="📷 Collect Data",
+            color="#3498DB",
+            hover_color="#2980B9",
+            action=self.open_collect_data
+        )
+
+        self.train_model_button = self.create_button(
+            text="📚 Train Model",
+            color="#2ECC71",
+            hover_color="#27AE60",
+            action=self.open_train_model
+        )
+
+        self.translate_button = self.create_button(
+            text="🖐️ Translate Gestures",
+            color="#F39C12",
+            hover_color="#E67E22",
+            action=self.open_translate_window
+        )
+
+        # New Reverse Translate button
+        self.reverse_translate_button = self.create_button(
+            text="🎤 Reverse Translate",
+            color="#8E44AD",
+            hover_color="#7D3C98",
+            action=self.open_reverse_translate
+        )
+
+        self.exit_button = self.create_button(
+            text="❌ Exit",
+            color="#E74C3C",
+            hover_color="#C0392B",
+            action=self.confirm_exit
+        )
+
+        canvas_layout.addWidget(self.add_gesture_button)
+        canvas_layout.addWidget(self.collect_data_button)
+        canvas_layout.addWidget(self.train_model_button)
+        canvas_layout.addWidget(self.translate_button)
+        canvas_layout.addWidget(self.reverse_translate_button)  # Add new button here
+        canvas_layout.addWidget(self.exit_button)
+
+        main_layout = QVBoxLayout(self)
+        main_layout.addLayout(top_layout)
+        main_layout.addWidget(self.canvas)
+        self.setLayout(main_layout)
+
+    def create_button(self, text, color, hover_color, action):
+        btn = QPushButton(text)
+        btn.setMinimumHeight(50)
+        btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {color};
+                border-radius: 8px;
+                padding: 10px 20px;
+                color: #ECF0F1;
+                font-size: 25px;
+                font-weight: bold;
+                text-align: center;
+            }}
+            QPushButton:hover {{
+                background-color: {hover_color};
+            }}
+        """)
+        btn.clicked.connect(action)
+        btn.setIconSize(btn.sizeHint())
+        return btn
+
+    def confirm_exit(self):
+        reply = QMessageBox.question(self, 'Exit', "Are you sure you want to exit?",
+                                     QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        if reply == QMessageBox.Yes:
+            QApplication.quit()
+
+    def open_add_gesture(self):
+        self.add_window = AddGestureWindow()
+        self.add_window.show()
+
+    def open_collect_data(self):
+        self.collect_window = CollectDataWindow()
+        self.collect_window.show()
+
+    def open_train_model(self):
+        self.train_window = TrainWindow()
+        self.train_window.show()
+
+    def open_translate_window(self):
+        self.translate_window = TranslateWindow()
+        self.translate_window.show()
+
+    def open_reverse_translate(self):
+        self.reverse_window = ReverseTranslateWindow()
+        self.reverse_window.show()
+
+
+if __name__ == "__main__":
+    app = QApplication(sys.argv)
+    app.setStyleSheet("""
+    QWidget {
+        background-color: #123499;
+        color: #FFFFFF;
+        font-family: Arial;
+        font-size: 14px;
+    }
+
+    QLabel {
+        font-size: 20px;
+        font-weight: bold;
+        color: #FFFFFF;
+    }
+
+    QLineEdit {
+        background-color: #40444B;
+        border: 1px solid #5B6EAE;
+        border-radius: 5px;
+        padding: 5px;
+        color: #FFFFFF;
+    }
+
+    QComboBox {
+        background-color: #40444B;
+        border: 1px solid #5B6EAE;
+        border-radius: 5px;
+        padding: 5px;
+        color: #FFFFFF;
+    }
+    QComboBox QAbstractItemView {
+        background-color: #40444B;
+        selection-background-color: #5B6EAE;
+        color: #FFFFFF;
+    }
+
+    QListWidget {
+        background-color: #40444B;
+        border: 1px solid #5B6EAE;
+        border-radius: 5px;
+        color: #FFFFFF;
+    }
+
+    QFrame#canvasFrame {
+        background-color: #23272A;
+        border: 2px solid #5B6EAE;
+        border-radius: 10px;
+        padding: 10px;
+    }
+
+    QFrame#collectDataFrame {
+        background-color: #23272A;
+        border: 2px solid #5B6EAE;
+        border-radius: 10px;
+        padding: 15px;
+    }
+    """)
+
+    window = MainMenu()
+    window.show()
+    sys.exit(app.exec_())
+
