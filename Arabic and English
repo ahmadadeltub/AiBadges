@@ -2,7 +2,7 @@ import sys
 import os
 import cv2
 import csv
-import torch
+import re
 import whisper
 import mediapipe as mp
 import numpy as np
@@ -15,13 +15,50 @@ from tensorflow.keras.layers import Dense, Dropout, Input
 from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
 from tensorflow.keras.optimizers import Adam
 import pyttsx3
-import speech_recognition as sr
+from gtts import gTTS
+from playsound import playsound
 import time
 
 from PyQt5.QtWidgets import (QApplication, QWidget, QVBoxLayout, QLabel, QLineEdit,
-                             QPushButton, QMessageBox, QListWidget, QComboBox, QHBoxLayout, QFrame, QDialog, QDialogButtonBox)
-from PyQt5.QtGui import QPixmap, QImage, QFont, QIcon
+                             QPushButton, QMessageBox, QListWidget, QHBoxLayout, QFrame, QDialog, QDialogButtonBox)
+from PyQt5.QtGui import QPixmap, QImage, QFont
 from PyQt5.QtCore import Qt, QTimer, QThread, pyqtSignal
+
+from PIL import ImageFont, ImageDraw, Image
+import arabic_reshaper
+from bidi.algorithm import get_display
+
+def putTextArabic(img, text, org, font_path="arial.ttf", font_size=32, color=(0,255,0)):
+    reshaped_text = arabic_reshaper.reshape(text)
+    bidi_text = get_display(reshaped_text)
+    if len(img.shape) == 3 and img.shape[2] == 3:
+        img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+    else:
+        img_rgb = img.copy()
+    pil_im = Image.fromarray(img_rgb)
+    draw = ImageDraw.Draw(pil_im)
+    try:
+        font = ImageFont.truetype(font_path, font_size)
+    except IOError:
+        font = ImageFont.load_default()
+    draw.text(org, bidi_text, font=font, fill=color)
+    img = np.array(pil_im)
+    img_bgr = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+    return img_bgr
+
+def speak_text(engine, text):
+    if re.search(r'[\u0600-\u06FF]', text):
+        try:
+            tts = gTTS(text=text, lang='ar')
+            filename = "temp_arabic.mp3"
+            tts.save(filename)
+            playsound(filename)
+            os.remove(filename)
+        except Exception as e:
+            print(f"Error in gTTS: {e}")
+    else:
+        engine.say(text)
+        engine.runAndWait()
 
 # Add Gesture Window
 class AddGestureWindow(QWidget):
@@ -36,10 +73,13 @@ class AddGestureWindow(QWidget):
     def init_ui(self):
         layout = QVBoxLayout()
         self.title_label = QLabel("Manage Gestures")
+        self.title_label.setFont(QFont("Arial", 20, QFont.Bold))
         self.gesture_list = QListWidget()
+        self.gesture_list.setLayoutDirection(Qt.RightToLeft)  # Support Arabic display
         self.load_gestures()
         self.gesture_input = QLineEdit()
-        self.gesture_input.setPlaceholderText("Enter gesture name")
+        self.gesture_input.setPlaceholderText("Enter gesture name (supports Arabic/English)")
+        self.gesture_input.setLayoutDirection(Qt.RightToLeft)  # Support Arabic input
 
         # Buttons
         button_layout = QHBoxLayout()
@@ -126,11 +166,8 @@ class AddGestureWindow(QWidget):
     def get_gesture_list(self):
         return [self.gesture_list.item(i).text() for i in range(self.gesture_list.count())]
 
-
-# Data Collection Thread
 class DataCollectionThread(QThread):
     collection_complete = pyqtSignal(str)
-
     def __init__(self, gesture_name):
         super().__init__()
         self.gesture_name = gesture_name
@@ -168,7 +205,7 @@ class DataCollectionThread(QThread):
                     try:
                         landmarks = [lm for point in hand_landmarks.landmark for lm in (point.x, point.y, point.z)]
                         data_row = [self.gesture_name] + landmarks
-                        with open(CSV_FILE, 'a', newline='') as file:
+                        with open(CSV_FILE, 'a', newline='', encoding='utf-8') as file:
                             writer = csv.writer(file)
                             writer.writerow(data_row)
                         collected_samples += 1
@@ -177,8 +214,8 @@ class DataCollectionThread(QThread):
                     except Exception as e:
                         print(f"Error processing landmarks: {e}")
 
-            cv2.putText(frame, f"Gesture: {self.gesture_name}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
-            cv2.putText(frame, f"Samples: {collected_samples}/{required_samples}", (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+            frame = putTextArabic(frame, f"Gesture: {self.gesture_name}", (10, 30), font_size=32, color=(0,255,0))
+            frame = putTextArabic(frame, f"Samples: {collected_samples}/{required_samples}", (10, 60), font_size=32, color=(0,255,0))
 
             cv2.imshow("Collect Hand Gestures", frame)
 
@@ -188,21 +225,24 @@ class DataCollectionThread(QThread):
 
         cap.release()
         hands.close()
-        cv2.destroyAllWindows()
+        try:
+            cv2.destroyAllWindows()
+        except cv2.error:
+            pass
 
         if collected_samples >= required_samples:
-            # Save a representative frame as gesture image
             if last_frame is not None:
                 image_path = os.path.join(IMAGES_DIR, f"{self.gesture_name}.png")
-                cv2.imwrite(image_path, last_frame)
+                ret, buf = cv2.imencode('.png', last_frame)
+                with open(image_path, 'wb') as f:
+                    f.write(buf)
             self.collection_complete.emit(f"Collected {collected_samples} samples for gesture '{self.gesture_name}'. Representative image saved.")
         else:
             self.collection_complete.emit("Data collection incomplete.")
 
     def stop(self):
         self.running = False
-
-
+        
 # Collect Data Window
 class CollectDataWindow(QWidget):
     GESTURES_FILE = 'gesture_data/gestures.txt'
@@ -215,24 +255,20 @@ class CollectDataWindow(QWidget):
     def init_ui(self):
         layout = QVBoxLayout()
 
-        # Title for the collect data window
         collect_title = QLabel("Collect Data")
         collect_title.setFont(QFont("Arial", 20, QFont.Bold))
         collect_title.setAlignment(Qt.AlignCenter)
 
-        # Frame for gesture selection
         frame = QFrame()
         frame.setObjectName("collectDataFrame")
-        frame_layout = QHBoxLayout(frame)  # Use horizontal layout
+        frame_layout = QHBoxLayout(frame)
 
         instruction_label = QLabel("Select a Gesture and Start Collecting:")
         instruction_label.setAlignment(Qt.AlignCenter)
 
-        # Use a QListWidget on the right
         self.gesture_list = QListWidget()
         self.load_gestures()
 
-        # Add a vertical layout inside frame: left instructions and start button
         left_layout = QVBoxLayout()
         left_layout.addWidget(instruction_label)
 
@@ -241,7 +277,7 @@ class CollectDataWindow(QWidget):
         left_layout.addStretch()
 
         frame_layout.addLayout(left_layout)
-        frame_layout.addWidget(self.gesture_list)  # Gestures on the right
+        frame_layout.addWidget(self.gesture_list)
 
         layout.addWidget(collect_title)
         layout.addWidget(frame)
@@ -251,7 +287,7 @@ class CollectDataWindow(QWidget):
 
     def load_gestures(self):
         if os.path.exists(self.GESTURES_FILE):
-            with open(self.GESTURES_FILE, 'r') as file:
+            with open(self.GESTURES_FILE, 'r', encoding='utf-8') as file:
                 gestures = file.read().splitlines()
                 self.gesture_list.addItems(gestures)
 
@@ -274,7 +310,6 @@ class CollectDataWindow(QWidget):
             self.collection_thread.stop()
             self.collection_thread.wait()
         event.accept()
-
 
 # Custom Dialog after training
 class TrainResultDialog(QDialog):
@@ -305,9 +340,7 @@ class TrainResultDialog(QDialog):
             background-color: #5B6EAE;
         }
         """)
-
         self.setLayout(layout)
-
 
 # Train Model Window
 class TrainWindow(QWidget):
@@ -380,28 +413,32 @@ class TrainWindow(QWidget):
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Training failed: {str(e)}")
 
-
 # Translate Gestures Window
 class TranslateWindow(QWidget):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Translate Gestures")
-
-        # Initialize UI
         self.init_ui()
-
-        # Initialize mediapipe, model, scaler, label encoder, etc.
         self.hands = mp.solutions.hands.Hands(max_num_hands=1, min_detection_confidence=0.7)
         self.engine = pyttsx3.init()
+        
+        # Attempt to set an Arabic voice using known Arabic voice names
+        voices = self.engine.getProperty('voices')
+        arabic_keywords = ["Arabic", "Naayf", "Zehra", "Tagh"]  # Add known Arabic voice names if available
+        self.arabic_voice_found = False
+        for voice in voices:
+            if any(keyword.lower() in voice.name.lower() for keyword in arabic_keywords):
+                self.engine.setProperty('voice', voice.id)
+                self.arabic_voice_found = True
+                break
+
         self.model = load_model('models/gesture_recognition_model.keras')
         self.scaler = joblib.load('models/scaler.save')
         self.label_encoder = joblib.load('models/label_encoder.save')
-
         self.cap = cv2.VideoCapture(0)
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.update_frame)
         self.timer.start(30)
-
         self.mp_drawing = mp.solutions.drawing_utils
         self.mp_hands = mp.solutions.hands
         self.last_gesture = None
@@ -467,7 +504,6 @@ class TranslateWindow(QWidget):
         gesture = "Not Detected"
         if results.multi_hand_landmarks:
             for hand_landmarks in results.multi_hand_landmarks:
-                # Draw landmarks on the RGB frame
                 self.mp_drawing.draw_landmarks(frame_rgb, hand_landmarks, self.mp_hands.HAND_CONNECTIONS)
 
                 landmarks = [lm for point in hand_landmarks.landmark for lm in (point.x, point.y, point.z)]
@@ -476,13 +512,12 @@ class TranslateWindow(QWidget):
                 class_id = np.argmax(prediction)
                 gesture = self.label_encoder.inverse_transform([class_id])[0]
 
-                # Speak only if gesture changed
                 if self.last_gesture != gesture:
-                    self.engine.say(gesture)
-                    self.engine.runAndWait()
+                    speak_text(self.engine, gesture)  # Use speak_text for voice output
                     self.last_gesture = gesture
 
-        cv2.putText(frame_rgb, f"Gesture: {gesture}", (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+        # Use putTextArabic to display text on the frame, supporting Arabic
+        frame_rgb = putTextArabic(frame_rgb, f"Gesture: {gesture}", (10, 50), font_size=32, color=(0, 255, 0))
 
         qt_image = QImage(frame_rgb.data, frame_rgb.shape[1], frame_rgb.shape[0], QImage.Format_RGB888)
         self.video_label.setPixmap(QPixmap.fromImage(qt_image))
@@ -491,8 +526,8 @@ class TranslateWindow(QWidget):
         self.cap.release()
         self.hands.close()
         event.accept()
-#############################################################################################
 
+# Reverse Translate Window
 class ReverseTranslateWindow(QWidget):
     GESTURES_FILE = 'gesture_data/gestures.txt'
     GESTURE_IMAGES_DIR = 'gesture_images'  # Directory containing gesture images
@@ -503,9 +538,6 @@ class ReverseTranslateWindow(QWidget):
         self.init_ui()
         self.load_gestures()
 
-        # Import whisper at the top or where necessary
-        import whisper
-        # Load Whisper model (adjust model size as needed)
         self.whisper_model = whisper.load_model("small")  # Downloaded at first use
 
         QTimer.singleShot(500, self.start_listening)
@@ -515,7 +547,6 @@ class ReverseTranslateWindow(QWidget):
         self.status_label.setText("Adjusting microphone noise...")
         QApplication.processEvents()
 
-        # adjust_mic_noise is a placeholder for future logic if needed
         self.adjust_mic_noise(1.0)
 
         self.status_label.setText("Listening (speak now)...")
@@ -523,12 +554,9 @@ class ReverseTranslateWindow(QWidget):
         QTimer.singleShot(100, self.capture_speech)
 
     def adjust_mic_noise(self, duration=1.0):
-        # Placeholder: With Whisper, there's no direct ambient noise adjustment.
-        # Just rely on Whisper's robustness.
         pass
 
     def capture_speech(self):
-        # Record from microphone to a temporary WAV file
         audio_file = "temp_speech_input.wav"
         if not self.record_audio(audio_file, record_seconds=4):
             self.status_label.setText("No audio captured. Please try again.")
@@ -543,7 +571,6 @@ class ReverseTranslateWindow(QWidget):
             self.instruction_label.setText("No speech recognized.")
             return
 
-        # Process recognized text
         self.show_gesture_for_word(recognized_text)
 
     def record_audio(self, filename, record_seconds=4):
@@ -561,8 +588,12 @@ class ReverseTranslateWindow(QWidget):
 
         frames = []
         for i in range(0, int(RATE / CHUNK * record_seconds)):
-            data = stream.read(CHUNK)
-            frames.append(data)
+            try:
+                data = stream.read(CHUNK)
+                frames.append(data)
+            except Exception as e:
+                print(f"Error recording audio: {e}")
+                break
 
         stream.stop_stream()
         stream.close()
@@ -580,7 +611,6 @@ class ReverseTranslateWindow(QWidget):
         return True
 
     def run_whisper(self, audio_file):
-        # Run Whisper transcription
         result = self.whisper_model.transcribe(audio_file, fp16=False)
         return result["text"].lower().strip()
 
@@ -593,7 +623,6 @@ class ReverseTranslateWindow(QWidget):
                 self.instruction_label.setText(f"Understood: '{word}'")
                 self.status_label.setText("Gesture found!")
                 QApplication.processEvents()
-                # Close after a delay
                 QTimer.singleShot(2000, self.close)
             else:
                 self.status_label.setText("No matching image found.")
@@ -687,7 +716,7 @@ class ReverseTranslateWindow(QWidget):
     def load_gestures(self):
         self.gestures = []
         if os.path.exists(self.GESTURES_FILE):
-            with open(self.GESTURES_FILE, 'r') as file:
+            with open(self.GESTURES_FILE, 'r', encoding='utf-8') as file:
                 self.gestures = file.read().splitlines()
 
     def closeEvent(self, event):
@@ -697,12 +726,12 @@ class ReverseTranslateWindow(QWidget):
 class MainMenu(QWidget):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Ai Smart Badge")
+        self.setWindowTitle("AI Smart Badge")
         self.setGeometry(150, 75, 700, 600)
         self.init_ui()
 
     def init_ui(self):
-        # LOGOS AND TITLE
+        # Top Layout with Logos and Title
         top_layout = QHBoxLayout()
 
         # Left logo (qstss.png) bigger
@@ -713,7 +742,7 @@ class MainMenu(QWidget):
         self.left_logo_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
 
         # Project title in the center
-        self.title_label = QLabel("Ai Smart Badge Software")
+        self.title_label = QLabel("AI Smart Badge Software")
         self.title_label.setStyleSheet("""
             color: #d9f1ff; 
             font-size: 45px; 
@@ -733,7 +762,7 @@ class MainMenu(QWidget):
         top_layout.addWidget(self.title_label, stretch=1)
         top_layout.addWidget(self.right_logo_label)
 
-        # Canvas frame
+        # Canvas frame for buttons
         self.canvas = QFrame(self)
         self.canvas.setObjectName("canvasFrame")
         self.canvas.setFrameShape(QFrame.StyledPanel)
@@ -769,7 +798,6 @@ class MainMenu(QWidget):
             action=self.open_translate_window
         )
 
-        # New Reverse Translate button
         self.reverse_translate_button = self.create_button(
             text="🎤 Reverse Translate",
             color="#8E44AD",
@@ -788,9 +816,10 @@ class MainMenu(QWidget):
         canvas_layout.addWidget(self.collect_data_button)
         canvas_layout.addWidget(self.train_model_button)
         canvas_layout.addWidget(self.translate_button)
-        canvas_layout.addWidget(self.reverse_translate_button)  # Add new button here
+        canvas_layout.addWidget(self.reverse_translate_button)
         canvas_layout.addWidget(self.exit_button)
 
+        # Main Layout
         main_layout = QVBoxLayout(self)
         main_layout.addLayout(top_layout)
         main_layout.addWidget(self.canvas)
@@ -843,7 +872,7 @@ class MainMenu(QWidget):
         self.reverse_window = ReverseTranslateWindow()
         self.reverse_window.show()
 
-
+# Main Execution
 if __name__ == "__main__":
     app = QApplication(sys.argv)
     app.setStyleSheet("""
@@ -902,8 +931,6 @@ if __name__ == "__main__":
         padding: 15px;
     }
     """)
-
     window = MainMenu()
     window.show()
     sys.exit(app.exec_())
-
