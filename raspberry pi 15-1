@@ -970,7 +970,7 @@ class ReverseTranslateWindow(QWidget):
                     self.instruction_label.setText(f"Understood: '{word}'")
                     self.status_label.setText("Gesture found!")
                     QApplication.processEvents()
-                    QTimer.singleShot(2000, self.close)
+                    QTimer.singleShot(6000, self.close)
                 else:
                     print(f"Image not found at: {image_path}")
                     self.status_label.setText("No matching image found.")
@@ -1196,22 +1196,42 @@ class MainMenu(QWidget):
         logo_layout.addStretch()
         logo_layout.addWidget(self.right_logo_label)
 
-        # Create the title label and style it
-        self.title_label = QLabel("AI Smart Badge Software")
-        self.title_label.setStyleSheet("""
+
+        # Create the title labels for English and Arabic
+        self.title_label_en = QLabel("Ai Smart Badge Platform")
+        self.title_label_en.setStyleSheet("""
             color: #d9f1ff; 
             font-size: 50px; 
             font-weight: bold; 
             padding-top: 20px;
         """)
-        main_layout.addSpacing(0)
+        self.title_label_en.setAlignment(Qt.AlignCenter)
 
-        self.title_label.setAlignment(Qt.AlignCenter)
+        self.title_label_ar = QLabel("Ai Pioneers Team - Qatar")  # Replace with your Arabic project title
+        self.title_label_ar.setStyleSheet("""
+            color: #e6b400; 
+            font-size: 50px; 
+            font-weight: bold; 
+            padding-top: 10px;
+        """)
+        self.title_label_ar.setAlignment(Qt.AlignCenter)
+        self.title_label_ar.setLayoutDirection(Qt.RightToLeft)
+
+        # Add layouts and title labels to the main vertical layout
+        main_layout.addLayout(logo_layout)
+        main_layout.addWidget(self.title_label_en)
+        main_layout.addWidget(self.title_label_ar)
+
+        # ... (rest of your UI setup for canvas and buttons)
+
+        self.setLayout(main_layout)
+        
 
         # Add the logo layout and title label to the main vertical layout
         main_layout.addLayout(logo_layout)
         main_layout.addSpacing(0)
-        main_layout.addWidget(self.title_label)
+        main_layout.addWidget(self.title_label_en)
+        main_layout.addWidget(self.title_label_ar)
 
         # Continue with the rest of the UI setup (canvas, buttons, etc.)
         self.canvas = QFrame(self)
