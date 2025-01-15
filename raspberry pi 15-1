@@ -1,9 +1,10 @@
 import sys
 import os
-
+import pyaudio
+import wave
 os.environ["QT_QPA_PLATFORM_PLUGIN_PATH"] = "/usr/lib/aarch64-linux-gnu/qt5/plugins/platforms"
 os.environ["QT_PLUGIN_PATH"] = "/usr/lib/aarch64-linux-gnu/qt5/plugins"
-#os.environ["QT_QPA_PLATFORM"] = "minimal"
+#os.environ["QT_QPA_PLAT9FORM"] = "minimal"
 
 from picamera2 import Picamera2  # Import Picamera2 for camera access
 
@@ -37,24 +38,44 @@ from PyQt5.QtCore import Qt, QTimer, QThread, pyqtSignal
 from PIL import ImageFont, ImageDraw, Image
 import arabic_reshaper
 from bidi.algorithm import get_display
+import subprocess
+import threading
+import re
 
 def speak_text_async(text):
     def _speak():
-        local_engine = pyttsx3.init()
         if re.search(r'[\u0600-\u06FF]', text):
             try:
+                from gtts import gTTS
+                import os
                 tts = gTTS(text=text, lang='ar')
                 filename = "temp_arabic.mp3"
                 tts.save(filename)
-                playsound(filename)
+                # Use mpg123 to play the Arabic MP3 file
+                subprocess.run(['mpg123', filename])
                 os.remove(filename)
             except Exception as e:
                 print(f"Error in gTTS: {e}")
         else:
-            local_engine.say(text)
-            local_engine.runAndWait()
+            subprocess.run(['espeak', text])
     threading.Thread(target=_speak, daemon=True).start()
 
+def speak_text(engine, text):
+    if re.search(r'[\u0600-\u06FF]', text):
+        try:
+            from gtts import gTTS
+            import os
+            tts = gTTS(text=text, lang='ar')
+            filename = "temp_arabic.mp3"
+            tts.save(filename)
+            subprocess.run(['mpg123', filename])
+            os.remove(filename)
+        except Exception as e:
+            print(f"Error in gTTS: {e}")
+    else:
+        subprocess.run(['espeak', text])
+        
+        
 def putTextArabic(img, text, org, font_path="Amiri-Bold.ttf", font_size=32, color=(0,255,0)):
     reshaped_text = arabic_reshaper.reshape(text)
     # Remove or comment out the bidi reordering
@@ -178,8 +199,22 @@ class AddGestureWindow(QWidget):
         button_layout.addWidget(self.add_button)
         button_layout.addWidget(self.modify_button)
         button_layout.addWidget(self.delete_button)
+                # Create Back and Exit buttons
+        back_button = QPushButton("Back")
+        back_button.setFont(QFont("Arial", 30, QFont.Bold))
+        back_button.setStyleSheet("""
+            QPushButton {
+                background-color: #F1C40F;
+                color: white;
+                border-radius: 8px;
+                padding: 10px;
+            }
+            QPushButton:hover {
+                background-color: #D8AC1D;
+            }
+        """)
+        back_button.clicked.connect(self.close)  # Closes the current window
         
-        # Connect buttons to their respective functions
         self.add_button.clicked.connect(self.add_gesture)
         self.modify_button.clicked.connect(self.modify_gesture)
         self.delete_button.clicked.connect(self.delete_gesture)
@@ -189,7 +224,8 @@ class AddGestureWindow(QWidget):
         layout.addWidget(self.gesture_list)
         layout.addWidget(self.gesture_input)
         layout.addLayout(button_layout)
-        
+        layout.addWidget(back_button)   # Add Back button
+
         self.setLayout(layout)
 
     def load_gestures(self):
@@ -270,6 +306,7 @@ class CollectDataWindow(QWidget):
         self.picam2 = None
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.update_frame)
+        self.last_frame = None  # Added to store the last frame
 
         self.init_ui()
 
@@ -307,6 +344,24 @@ class CollectDataWindow(QWidget):
         layout.addWidget(self.start_button)
         layout.addWidget(self.video_label)
 
+        # Create Back and Exit buttons
+        back_button = QPushButton("Back")
+        back_button.setFont(QFont("Arial", 30, QFont.Bold))
+        back_button.setStyleSheet("""
+            QPushButton {
+                background-color: #F1C40F;
+                color: white;
+                border-radius: 8px;
+                padding: 10px;
+            }
+            QPushButton:hover {
+                background-color: #D8AC1D;
+            }
+        """)
+        back_button.clicked.connect(self.close)  # Closes the current window
+
+        layout.addWidget(back_button)   # Add Back button
+
         self.setLayout(layout)
 
     def load_gestures(self):
@@ -342,6 +397,7 @@ class CollectDataWindow(QWidget):
         frame = self.picam2.capture_array()
         if frame is None:
             return
+
         # Convert BGR to RGB for processing
         rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         results = self.hands.process(rgb_frame)
@@ -361,6 +417,9 @@ class CollectDataWindow(QWidget):
                     )
                 except Exception as e:
                     print(f"Error processing landmarks: {e}")
+
+        # Save the last frame for image saving
+        self.last_frame = frame.copy()
 
         # Embed RTL markers around the Arabic gesture name
         text1 = f"Gesture: \u202B{self.current_gesture}\u202C"
@@ -384,6 +443,15 @@ class CollectDataWindow(QWidget):
             self.picam2.close()
             self.picam2 = None
         self.timer.stop()
+
+        # Save the last frame as an image
+        if self.last_frame is not None:
+            images_dir = 'gesture_images'
+            os.makedirs(images_dir, exist_ok=True)
+            image_path = os.path.join(images_dir, f"{self.current_gesture}.png")
+            cv2.imwrite(image_path, self.last_frame)
+            print(f"Saved image to {image_path}")
+
         QMessageBox.information(
             self,
             "Info",
@@ -463,7 +531,24 @@ class TrainWindow(QWidget):
                 background-color: #27AE60;
             }
         """)
+                # Create Back and Exit buttons
+        back_button = QPushButton("Back")
+        back_button.setFont(QFont("Arial", 30, QFont.Bold))
+        back_button.setStyleSheet("""
+            QPushButton {
+                background-color: #F1C40F;
+                color: white;
+                border-radius: 8px;
+                padding: 10px;
+            }
+            QPushButton:hover {
+                background-color: #D8AC1D;
+            }
+        """)
+        back_button.clicked.connect(self.close)  # Closes the current window
         layout.addWidget(self.train_button, alignment=Qt.AlignCenter)
+        layout.addWidget(back_button)   # Add Back button
+
         self.setLayout(layout)
 
     def train_model(self):
@@ -603,6 +688,33 @@ class TranslateWindow(QWidget):
         self.hands.close()
         event.accept()
 
+
+#…………………………………………………………………………………………………
+
+class TranscriptionWorker(QThread):
+    transcription_complete = pyqtSignal(str)
+    transcription_failed = pyqtSignal(str)
+
+    def __init__(self, whisper_model, audio_file, gestures, gesture_images_dir):
+        super().__init__()
+        self.whisper_model = whisper_model
+        self.audio_file = audio_file
+        self.gestures = gestures
+        self.gesture_images_dir = gesture_images_dir
+
+    def run(self):
+        try:
+            # Run Whisper transcription
+            result = self.whisper_model.transcribe(self.audio_file, fp16=False)
+            recognized_text = result["text"].lower().strip()
+            if not recognized_text:
+                self.transcription_failed.emit("No speech recognized.")
+                return
+            # Emit the recognized text
+            self.transcription_complete.emit(recognized_text)
+        except Exception as e:
+            self.transcription_failed.emit(f"Transcription error: {str(e)}")
+
 class ReverseTranslateWindow(QWidget):
     GESTURES_FILE = 'gesture_data/gestures.txt'
     GESTURE_IMAGES_DIR = 'gesture_images'  # Directory containing gesture images
@@ -610,129 +722,23 @@ class ReverseTranslateWindow(QWidget):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Reverse Translate (AI-Powered Speech to Gesture)")
+        self.setGeometry(50, 50, 600, 400)
         self.init_ui()
         self.load_gestures()
 
-        self.whisper_model = whisper.load_model("small")  # Downloaded at first use
+        # Load a smaller Whisper model for faster processing
+        try:
+            self.whisper_model = whisper.load_model("small")  # Options: "tiny", "base", "small"
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to load Whisper model: {str(e)}")
+            sys.exit(1)
 
+        # Initialize variables
+        self.transcription_worker = None
+        self.audio_file = "temp_speech_input.wav"
+
+        # Start listening after a short delay
         QTimer.singleShot(500, self.start_listening)
-
-    def start_listening(self):
-        self.instruction_label.setText("Please say the gesture name...")
-        self.status_label.setText("Adjusting microphone noise...")
-        QApplication.processEvents()
-
-        self.adjust_mic_noise(1.0)
-
-        self.status_label.setText("Listening (speak now)...")
-        QApplication.processEvents()
-        QTimer.singleShot(100, self.capture_speech)
-
-    def adjust_mic_noise(self, duration=1.0):
-        pass
-
-    def capture_speech(self):
-        audio_file = "temp_speech_input.wav"
-        if not self.record_audio(audio_file, record_seconds=4):
-            self.status_label.setText("No audio captured. Please try again.")
-            return
-
-        self.status_label.setText("Processing with Whisper...")
-        QApplication.processEvents()
-
-        recognized_text = self.run_whisper(audio_file)
-        if recognized_text is None or recognized_text.strip() == "":
-            self.status_label.setText("Could not understand speech. Please try again.")
-            self.instruction_label.setText("No speech recognized.")
-            return
-
-        self.show_gesture_for_word(recognized_text)
-
-    def record_audio(self, filename, record_seconds=4):
-        import pyaudio
-        import wave
-
-        CHUNK = 1024
-        FORMAT = pyaudio.paInt16
-        CHANNELS = 1
-        RATE = 16000
-        p = pyaudio.PyAudio()
-
-        stream = p.open(format=FORMAT, channels=CHANNELS,
-                        rate=RATE, input=True, frames_per_buffer=CHUNK)
-
-        frames = []
-        for i in range(0, int(RATE / CHUNK * record_seconds)):
-            try:
-                data = stream.read(CHUNK)
-                frames.append(data)
-            except Exception as e:
-                print(f"Error recording audio: {e}")
-                break
-
-        stream.stop_stream()
-        stream.close()
-        p.terminate()
-
-        if len(frames) == 0:
-            return False
-
-        wf = wave.open(filename, 'wb')
-        wf.setnchannels(CHANNELS)
-        wf.setsampwidth(p.get_sample_size(FORMAT))
-        wf.setframerate(RATE)
-        wf.writeframes(b''.join(frames))
-        wf.close()
-        return True
-
-    def run_whisper(self, audio_file):
-        result = self.whisper_model.transcribe(audio_file, fp16=False)
-        return result["text"].lower().strip()
-
-    def show_gesture_for_word(self, word):
-        # Normalize English word by removing punctuation and converting to lowercase
-        normalized_word = re.sub(r'[^\w\s]', '', word).strip().lower()
-
-        # Check if the word contains Arabic characters
-        if re.search(r'[\u0600-\u06FF]', word):
-            # Arabic logic
-            if word in self.gestures:
-                image_path = os.path.join(self.GESTURE_IMAGES_DIR, f"{word}.png")
-                if os.path.exists(image_path):
-                    pixmap = QPixmap(image_path)
-                    self.image_label.setPixmap(pixmap.scaled(400, 400, Qt.KeepAspectRatio, Qt.SmoothTransformation))
-                    self.instruction_label.setText(f"Understood: '{word}'")
-                    self.status_label.setText("Gesture found!")
-                    QApplication.processEvents()
-                    QTimer.singleShot(2000, self.close)
-                else:
-                    self.status_label.setText("No matching image found.")
-                    self.instruction_label.setText(f"No image for '{word}'. Try another gesture.")
-            else:
-                self.status_label.setText("Unknown gesture.")
-                self.instruction_label.setText(f"'{word}' does not match any known gesture. Try again.")
-        else:
-            # English logic: try to match normalized word with gesture list
-            matched_gesture = None
-            for gesture in self.gestures:
-                if gesture.lower() == normalized_word:
-                    matched_gesture = gesture
-                    break
-            if matched_gesture:
-                image_path = os.path.join(self.GESTURE_IMAGES_DIR, f"{matched_gesture}.png")
-                if os.path.exists(image_path):
-                    pixmap = QPixmap(image_path)
-                    self.image_label.setPixmap(pixmap.scaled(400, 400, Qt.KeepAspectRatio, Qt.SmoothTransformation))
-                    self.instruction_label.setText(f"Understood: '{word}'")
-                    self.status_label.setText("Gesture found!")
-                    QApplication.processEvents()
-                    QTimer.singleShot(2000, self.close)
-                else:
-                    self.status_label.setText("No matching image found.")
-                    self.instruction_label.setText(f"No image for '{word}'. Try another gesture.")
-            else:
-                self.status_label.setText("Unknown gesture.")
-                self.instruction_label.setText(f"'{word}' does not match any known gesture. Try again.")
 
     def init_ui(self):
         self.main_layout = QVBoxLayout()
@@ -751,33 +757,39 @@ class ReverseTranslateWindow(QWidget):
 
         # Microphone and status layout
         mic_layout = QHBoxLayout()
-        self.mic_label = QLabel()
-        if os.path.exists("mic.png"):
-            mic_pixmap = QPixmap("mic.png").scaled(150, 150, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-            self.mic_label.setPixmap(mic_pixmap)
+        
+        # Loading Indicator (Animated GIF)
+        self.loading_label = QLabel()
+        loading_gif_path = "loading.gif"  # Ensure you have a loading.gif in your project directory
+        if os.path.exists(loading_gif_path):
+            self.loading_movie = QMovie(loading_gif_path)
+            self.loading_label.setMovie(self.loading_movie)
+            self.loading_movie.start()
+            self.loading_label.hide()  # Hide initially
         else:
-            self.mic_label.setText("ðŸŽ¤")
-            self.mic_label.setAlignment(Qt.AlignCenter)
-            font = self.mic_label.font()
-            font.setPointSize(48)
-            self.mic_label.setFont(font)
+            # If no loading GIF, use a simple text indicator
+            self.loading_label.setText("")
+            self.loading_label.setFont(QFont("Arial", 24))
+            self.loading_label.hide()  # Hide initially
 
-        mic_layout.addWidget(self.mic_label, alignment=Qt.AlignCenter)
+        mic_layout.addWidget(self.loading_label, alignment=Qt.AlignCenter)
 
+        # Status label
         self.status_label = QLabel("Preparing to listen...")
         self.status_label.setAlignment(Qt.AlignCenter)
         self.status_label.setFont(QFont("Arial", 14, QFont.Normal))
         mic_layout.addWidget(self.status_label)
         self.main_layout.addLayout(mic_layout)
 
+        # Image label for displaying recognized gesture images
         self.image_label = QLabel()
         self.image_label.setAlignment(Qt.AlignCenter)
         self.main_layout.addWidget(self.image_label)
 
         # Buttons (Retry and Close)
         button_layout = QHBoxLayout()
-        self.retry_button = QPushButton("â†» Retry")
-        self.close_button = QPushButton("â¨‰ Close")
+        self.retry_button = QPushButton(" Retry")
+        self.close_button = QPushButton(" Close")
 
         self.retry_button.setStyleSheet("""
             QPushButton {
@@ -814,23 +826,202 @@ class ReverseTranslateWindow(QWidget):
         button_layout.addWidget(self.close_button)
         self.main_layout.addLayout(button_layout)
 
-        # Set the layout
+        # Set the final layout
         self.setLayout(self.main_layout)
 
     def load_gestures(self):
         self.gestures = []
         if os.path.exists(self.GESTURES_FILE):
             with open(self.GESTURES_FILE, 'r', encoding='utf-8') as file:
-                self.gestures = file.read().splitlines()
+                self.gestures = [line.strip().lower() for line in file if line.strip()]
+        else:
+            QMessageBox.warning(self, "Warning", f"Gestures file '{self.GESTURES_FILE}' not found.")
+
+    def start_listening(self):
+        self.instruction_label.setText("Please say the gesture name...")
+        self.status_label.setText("Adjusting microphone noise...")
+        self.image_label.clear()
+
+        # Show loading indicator
+        self.loading_label.show()
+
+        QApplication.processEvents()
+
+        # Adjust microphone noise if needed
+        self.adjust_mic_noise(1.0)
+
+        # Update status
+        self.status_label.setText("Listening (speak now)...")
+        QApplication.processEvents()
+
+        # Start capturing speech after a short delay
+        QTimer.singleShot(100, self.capture_speech)
+
+    def adjust_mic_noise(self, duration=1.0):
+        # Placeholder for microphone noise adjustment logic
+        # You can implement VAD or noise reduction here if needed
+        pass
+
+    def capture_speech(self):
+        self.status_label.setText("Recording...")
+        QApplication.processEvents()
+
+        success = self.record_audio(self.audio_file, record_seconds=4)
+        if not success:
+            self.status_label.setText("No audio captured. Please try again.")
+            self.loading_label.hide()
+            return
+
+        self.status_label.setText("Processing with Whisper...")
+        QApplication.processEvents()
+
+        # Start transcription in a separate thread
+        self.transcription_worker = TranscriptionWorker(
+            whisper_model=self.whisper_model,
+            audio_file=self.audio_file,
+            gestures=self.gestures,
+            gesture_images_dir=self.GESTURE_IMAGES_DIR
+        )
+        self.transcription_worker.transcription_complete.connect(self.on_transcription_complete)
+        self.transcription_worker.transcription_failed.connect(self.on_transcription_failed)
+        self.transcription_worker.start()
+
+    def record_audio(self, filename, record_seconds=4):
+        CHUNK = 1024
+        FORMAT = pyaudio.paInt16
+        CHANNELS = 1
+        RATE = 16000
+        p = pyaudio.PyAudio()
+
+        try:
+            stream = p.open(format=FORMAT, channels=CHANNELS,
+                            rate=RATE, input=True, frames_per_buffer=CHUNK)
+        except Exception as e:
+            print(f"Error opening microphone stream: {e}")
+            QMessageBox.critical(self, "Error", f"Failed to access microphone: {str(e)}")
+            p.terminate()
+            return False
+
+        frames = []
+        try:
+            for _ in range(0, int(RATE / CHUNK * record_seconds)):
+                data = stream.read(CHUNK)
+                frames.append(data)
+        except Exception as e:
+            print(f"Error during recording: {e}")
+            QMessageBox.critical(self, "Error", f"Failed during recording: {str(e)}")
+            stream.stop_stream()
+            stream.close()
+            p.terminate()
+            return False
+
+        stream.stop_stream()
+        stream.close()
+        p.terminate()
+
+        if not frames:
+            return False
+
+        try:
+            wf = wave.open(filename, 'wb')
+            wf.setnchannels(CHANNELS)
+            wf.setsampwidth(p.get_sample_size(FORMAT))
+            wf.setframerate(RATE)
+            wf.writeframes(b''.join(frames))
+            wf.close()
+            return True
+        except Exception as e:
+            print(f"Error saving audio file: {e}")
+            QMessageBox.critical(self, "Error", f"Failed to save audio: {str(e)}")
+            return False
+
+    def on_transcription_complete(self, recognized_text):
+        print(f"Transcription complete: {recognized_text}")
+        self.status_label.setText("Transcription complete.")
+        self.loading_label.hide()
+        self.show_gesture_for_word(recognized_text)
+
+    def on_transcription_failed(self, error_message):
+        print(f"Transcription failed: {error_message}")
+        self.status_label.setText(error_message)
+        self.instruction_label.setText("Please try again.")
+        self.loading_label.hide()
+
+    def run_whisper(self, audio_file):
+        # Deprecated: Now handled in TranscriptionWorker
+        pass
+
+    def show_gesture_for_word(self, word):
+        print(f"Recognized word: {word}")
+        normalized_word = re.sub(r'[^\w\s]', '', word).strip().lower()
+        print(f"Normalized word: {normalized_word}")
+
+        # Check if the word contains Arabic characters
+        if re.search(r'[\u0600-\u06FF]', word):
+            print("Arabic logic branch")
+            if word in self.gestures:
+                image_path = os.path.join(self.GESTURE_IMAGES_DIR, f"{word}.png")
+                print(f"Looking for image at: {image_path}")
+                if os.path.exists(image_path):
+                    print("Image found. Displaying image.")
+                    pixmap = QPixmap(image_path)
+                    self.image_label.setPixmap(pixmap.scaled(
+                        400, 400, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+                    self.instruction_label.setText(f"Understood: '{word}'")
+                    self.status_label.setText("Gesture found!")
+                    QApplication.processEvents()
+                    QTimer.singleShot(2000, self.close)
+                else:
+                    print(f"Image not found at: {image_path}")
+                    self.status_label.setText("No matching image found.")
+                    self.instruction_label.setText(f"No image for '{word}'. Try another gesture.")
+            else:
+                print(f"Word '{word}' not found in gestures list")
+                self.status_label.setText("Unknown gesture.")
+                self.instruction_label.setText(f"'{word}' does not match any known gesture. Try again.")
+        else:
+            # English logic
+            matched_gesture = None
+            for gesture in self.gestures:
+                if gesture.lower() == normalized_word:
+                    matched_gesture = gesture
+                    break
+            if matched_gesture:
+                image_path = os.path.join(self.GESTURE_IMAGES_DIR, f"{matched_gesture}.png")
+                if os.path.exists(image_path):
+                    pixmap = QPixmap(image_path)
+                    self.image_label.setPixmap(pixmap.scaled(
+                        400, 400, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+                    self.instruction_label.setText(f"Understood: '{word}'")
+                    self.status_label.setText("Gesture found!")
+                    QApplication.processEvents()
+                    QTimer.singleShot(6000, self.close)
+                else:
+                    print(f"Image not found at: {image_path}")
+                    self.status_label.setText("No matching image found.")
+                    self.instruction_label.setText(f"No image for '{word}'. Try another gesture.")
+            else:
+                print(f"Word '{word}' not found in gestures list")
+                self.status_label.setText("Unknown gesture.")
+                self.instruction_label.setText(f"'{word}' does not match any known gesture. Try again.")
 
     def closeEvent(self, event):
+        # Clean up any running transcription workers
+        if self.transcription_worker and self.transcription_worker.isRunning():
+            self.transcription_worker.terminate()
+            self.transcription_worker.wait()
         event.accept()
 
+
+        #……………#…………………##########
+        
 class ContinuousTranslateWindow(QWidget):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Continuous Translate Gestures")
-        self.setGeometry(100, 100, 800, 600)
+        self.setGeometry(30, 20, 700, 500)
+        self.setFixedSize(600, 400)  # Fix the window size
+
         self.init_ui()
 
         self.hands = mp.solutions.hands.Hands(max_num_hands=1, min_detection_confidence=0.7)
@@ -864,22 +1055,76 @@ class ContinuousTranslateWindow(QWidget):
     def init_ui(self):
         main_layout = QVBoxLayout()
         top_button_layout = QHBoxLayout()
-        self.back_button = QPushButton("â† Back")
-        self.exit_button = QPushButton("â¨‰ Exit")
+        
+        self.back_button = QPushButton(" Back")
+        self.exit_button = QPushButton(" Exit")
+        
+        # Style Back and Exit buttons as needed
+        self.back_button.setFont(QFont("Arial", 16, QFont.Bold))
+        self.back_button.setStyleSheet("""
+            QPushButton {
+                background-color: #F1C40F;
+                color: white;
+                border-radius: 8px;
+                padding: 10px;
+            }
+            QPushButton:hover {
+                background-color: #D8AC1D;
+            }
+        """)
+        self.exit_button.setFont(QFont("Arial", 16, QFont.Bold))
+        self.exit_button.setStyleSheet("""
+            QPushButton {
+                background-color: #E74C3C;
+                color: white;
+                border-radius: 8px;
+                padding: 10px;
+            }
+            QPushButton:hover {
+                background-color: #C0392B;
+            }
+        """)
+        
         top_button_layout.addWidget(self.back_button)
         top_button_layout.addStretch()
         top_button_layout.addWidget(self.exit_button)
+        
         self.video_label = QLabel()
         self.sequence_label = QLabel("Detected Sequence: ")
         self.sequence_label.setAlignment(Qt.AlignCenter)
-        self.sequence_label.setStyleSheet("font-size: 24px; color: #FFFFFF;")
+        self.sequence_label.setStyleSheet("font-size: 16px; color: #FFFFFF;")
+        
+        # Clear Button to clear the sequence
+        self.clear_button = QPushButton("Clear")
+        self.clear_button.setFont(QFont("Arial", 16, QFont.Bold))
+        self.clear_button.setStyleSheet("""
+            QPushButton {
+                background-color: #95A5A6;
+                color: #FFFFFF;
+                border-radius: 8px;
+                padding: 10px;
+            }
+            QPushButton:hover {
+                background-color: #7F8C8D;
+            }
+        """)
+        self.clear_button.clicked.connect(self.clear_sequence)
+
+        # Add widgets to layout
         main_layout.addLayout(top_button_layout)
         main_layout.addWidget(self.video_label)
         main_layout.addWidget(self.sequence_label)
+        main_layout.addWidget(self.clear_button)  # Add Clear button below the sequence label
+
         self.setLayout(main_layout)
 
         self.back_button.clicked.connect(self.close)
         self.exit_button.clicked.connect(QApplication.quit)
+
+    def clear_sequence(self):
+        """Clears the detected sequence text and resets the gesture sequence."""
+        self.gesture_sequence.clear()
+        self.sequence_label.setText("Detected Sequence: ")
 
     def update_frame(self):
         frame = self.picam2.capture_array()
@@ -916,6 +1161,8 @@ class ContinuousTranslateWindow(QWidget):
         self.picam2.stop()
         self.hands.close()
         event.accept()
+
+
 class MainMenu(QWidget):
     def __init__(self):
         super().__init__()
@@ -1141,3 +1388,5 @@ if __name__ == "__main__":
     window = MainMenu()
     window.show()
     sys.exit(app.exec_())
+
+
