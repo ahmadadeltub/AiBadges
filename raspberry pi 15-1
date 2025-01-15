@@ -55,13 +55,17 @@ def speak_text_async(text):
             local_engine.runAndWait()
     threading.Thread(target=_speak, daemon=True).start()
 
-def putTextArabic(img, text, org, font_path="arial.ttf", font_size=32, color=(0,255,0)):
+def putTextArabic(img, text, org, font_path="Amiri-Bold.ttf", font_size=32, color=(0,255,0)):
     reshaped_text = arabic_reshaper.reshape(text)
-    bidi_text = get_display(reshaped_text)
+    # Remove or comment out the bidi reordering
+    # bidi_text = get_display(reshaped_text)
+    bidi_text = reshaped_text
+    
     if len(img.shape) == 3 and img.shape[2] == 3:
         img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
     else:
         img_rgb = img.copy()
+    
     pil_im = Image.fromarray(img_rgb)
     draw = ImageDraw.Draw(pil_im)
     try:
@@ -72,6 +76,9 @@ def putTextArabic(img, text, org, font_path="arial.ttf", font_size=32, color=(0,
     img = np.array(pil_im)
     img_bgr = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
     return img_bgr
+
+
+
 
 def speak_text(engine, text):
     if re.search(r'[\u0600-\u06FF]', text):
@@ -269,7 +276,7 @@ class CollectDataWindow(QWidget):
     def init_ui(self):
         layout = QVBoxLayout()
         title_label = QLabel("Collect Data")
-        title_label.setFont(QFont("Arial", 20, QFont.Bold))
+        title_label.setFont(QFont("Amiri-Bold", 20, QFont.Bold))
         title_label.setAlignment(Qt.AlignCenter)
         layout.addWidget(title_label)
 
@@ -278,7 +285,7 @@ class CollectDataWindow(QWidget):
 
         self.start_button = QPushButton("Start Collecting Data")
         self.start_button.clicked.connect(self.start_collection)
-        
+
         self.start_button.setStyleSheet("""
             QPushButton {
                 background-color: #2ECC71;
@@ -335,7 +342,7 @@ class CollectDataWindow(QWidget):
         frame = self.picam2.capture_array()
         if frame is None:
             return
-        frame = cv2.flip(frame, 1)
+        # Convert BGR to RGB for processing
         rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         results = self.hands.process(rgb_frame)
 
@@ -355,7 +362,8 @@ class CollectDataWindow(QWidget):
                 except Exception as e:
                     print(f"Error processing landmarks: {e}")
 
-        text1 = f"Gesture: {self.current_gesture}"
+        # Embed RTL markers around the Arabic gesture name
+        text1 = f"Gesture: \u202B{self.current_gesture}\u202C"
         text2 = f"Samples: {self.collected_samples}/{self.required_samples}"
         frame = putTextArabic(frame, text1, (10, 30), font_size=32, color=(0,255,0))
         frame = putTextArabic(frame, text2, (10, 70), font_size=32, color=(0,255,0))
@@ -400,6 +408,7 @@ class CollectDataWindow(QWidget):
             self.picam2 = None
         self.hands.close()
         event.accept()
+
 
 class TrainResultDialog(QDialog):
     def __init__(self, message):
@@ -747,7 +756,7 @@ class ReverseTranslateWindow(QWidget):
             mic_pixmap = QPixmap("mic.png").scaled(150, 150, Qt.KeepAspectRatio, Qt.SmoothTransformation)
             self.mic_label.setPixmap(mic_pixmap)
         else:
-            self.mic_label.setText("🎤")
+            self.mic_label.setText("ðŸŽ¤")
             self.mic_label.setAlignment(Qt.AlignCenter)
             font = self.mic_label.font()
             font.setPointSize(48)
@@ -767,8 +776,8 @@ class ReverseTranslateWindow(QWidget):
 
         # Buttons (Retry and Close)
         button_layout = QHBoxLayout()
-        self.retry_button = QPushButton("↻ Retry")
-        self.close_button = QPushButton("⨉ Close")
+        self.retry_button = QPushButton("â†» Retry")
+        self.close_button = QPushButton("â¨‰ Close")
 
         self.retry_button.setStyleSheet("""
             QPushButton {
@@ -855,8 +864,8 @@ class ContinuousTranslateWindow(QWidget):
     def init_ui(self):
         main_layout = QVBoxLayout()
         top_button_layout = QHBoxLayout()
-        self.back_button = QPushButton("← Back")
-        self.exit_button = QPushButton("⨉ Exit")
+        self.back_button = QPushButton("â† Back")
+        self.exit_button = QPushButton("â¨‰ Exit")
         top_button_layout.addWidget(self.back_button)
         top_button_layout.addStretch()
         top_button_layout.addWidget(self.exit_button)
@@ -1132,4 +1141,3 @@ if __name__ == "__main__":
     window = MainMenu()
     window.show()
     sys.exit(app.exec_())
-
